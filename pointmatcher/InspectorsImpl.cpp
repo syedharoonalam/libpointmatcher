@@ -207,7 +207,7 @@ void InspectorsImpl<T>::AbstractVTKInspector::dumpDataPoints(const DataPoints& d
 	stream << (bWriteBinary ? "BINARY":"ASCII") << "\n";
 	stream << "DATASET POLYDATA\n";
 
-	stream << "POINTS " << features.cols() << " " << getTypeName<T>() << "\n";
+	stream << "POINTS " << features.cols() << " " << getTypeName<T>() << "\n"; //TODO discuss: this would change the ASCII type in case T is double
 
 	if(features.rows() == 4)
 	{
