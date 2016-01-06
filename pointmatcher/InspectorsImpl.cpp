@@ -41,6 +41,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <iostream>
 #include <sstream>
 #include <fstream>
+#include <algorithm>
+#include <boost/type_traits/is_same.hpp>
 
 using namespace std;
 
@@ -137,11 +139,63 @@ InspectorsImpl<T>::AbstractVTKInspector::AbstractVTKInspector(const std::string&
 	bDumpIterationInfo(Parametrizable::get<bool>("dumpIterationInfo")),
 	bDumpDataLinks(Parametrizable::get<bool>("dumpDataLinks")),
 	bDumpReading(Parametrizable::get<bool>("dumpReading")),
-	bDumpReference(Parametrizable::get<bool>("dumpReference"))
+	bDumpReference(Parametrizable::get<bool>("dumpReference")),
+	bWriteBinary(Parametrizable::get<bool>("writeBinary"))
 {
 }
 
-	
+const int one = 1;
+const bool isBigEndian = *reinterpret_cast<const unsigned char*>(&one) == static_cast<unsigned char>(0);
+const int oneBigEndian = isBigEndian ? 1 : 1 << 8 * (sizeof(int) - 1);
+
+template <typename T>
+struct ConverterToBytes {
+	union {
+		T v;
+		char bytes[sizeof(T)];
+	};
+
+	ConverterToBytes(T v) : v(v) {}
+
+	void swapBytes(){
+		ConverterToBytes tmp(this->v);
+		std::reverse_copy(tmp.bytes, tmp.bytes + sizeof(T), bytes);
+	}
+
+	friend std::ostream & operator << (std::ostream & out, ConverterToBytes c){
+		out.write(c.bytes, sizeof(T));
+		return out;
+	}
+};
+
+template<typename Matrix>
+std::ostream & writeVtkData(bool writeBinary,const Matrix & data,  std::ostream & out){
+	if(writeBinary){
+		typedef typename Matrix::Scalar TargetDataType;
+		for(int r = 0; r < data.rows(); r++){
+			for(int c = 0; c < data.cols(); c++){
+				ConverterToBytes<TargetDataType> converter(static_cast<TargetDataType>(data(r, c)));
+				if(!isBigEndian){
+					converter.swapBytes();
+				}
+				out << converter;
+			}
+		}
+	}else {
+		out << data;
+	}
+	return out;
+}
+
+template<typename T>
+std::string getTypeName() {
+	if (boost::is_same<double, T>::value) {
+		return "double";
+	} else {
+		return "float";
+	}
+}
+
 template<typename T>
 void InspectorsImpl<T>::AbstractVTKInspector::dumpDataPoints(const DataPoints& data, std::ostream& stream)
 {
@@ -150,21 +204,32 @@ void InspectorsImpl<T>::AbstractVTKInspector::dumpDataPoints(const DataPoints& d
 	
 	stream << "# vtk DataFile Version 3.0\n";
 	stream << "File created by libpointmatcher\n";
-	stream << "ASCII\n";
+	stream << (bWriteBinary ? "BINARY":"ASCII") << "\n";
 	stream << "DATASET POLYDATA\n";
-	stream << "POINTS " << features.cols() << " float\n";
+
+	stream << "POINTS " << features.cols() << " " << getTypeName<T>() << "\n";
+
 	if(features.rows() == 4)
 	{
-		stream << features.topLeftCorner(3, features.cols()).transpose() << "\n";
+		writeVtkData(bWriteBinary, features.topLeftCorner(3, features.cols()).transpose(), stream) << "\n";
 	}
 	else
 	{
-		stream << features.transpose() << "\n";
+		writeVtkData(bWriteBinary, features.transpose(), stream)  << "\n";
 	}
 	
 	stream << "VERTICES "  << features.cols() << " "<< features.cols() * 2 << "\n";
 	for (int i = 0; i < features.cols(); ++i)
-		stream << "1 " << i << "\n";
+		if(bWriteBinary){
+			stream.write(reinterpret_cast<const char*>(&oneBigEndian), sizeof(int));
+			ConverterToBytes<int> converter(i);
+			if(!isBigEndian){
+				converter.swapBytes();
+			}
+			stream.write(converter.bytes, sizeof(int));
+		}else {
+			stream << "1 " << i << "\n";
+		}
 	
 
 	// Save points
@@ -434,14 +499,18 @@ void InspectorsImpl<T>::AbstractVTKInspector::buildGenericAttributeStream(std::o
 		{
 			stream << attribute << " " << nameTag << " " << forcedDim << "\n";
 			stream << padWithOnes(desc, forcedDim, desc.cols()).transpose();
+			if(bWriteBinary){
+				//TODO support binary writing for COLOR_SCALAR
+				throw std::runtime_error("Binary writing of color data is not supported, yet!");
+			}
 		}
 		else
 		{
-			stream << attribute << " " << nameTag << " float\n";
+			stream << attribute << " " << nameTag << " " << getTypeName<T>() << "\n";
 			if(attribute.compare("SCALARS") == 0)
 				stream << "LOOKUP_TABLE default\n";
 
-			stream << padWithZeros(desc, forcedDim, desc.cols()).transpose();
+			writeVtkData(bWriteBinary, padWithZeros(desc, forcedDim, desc.cols()).transpose(), stream);
 		}
 		stream << "\n";
 	}
@@ -548,7 +617,7 @@ void InspectorsImpl<T>::AbstractVTKInspector::buildVectorStream(std::ostream& st
 
 	if(descRef.rows() != 0 && descRead.rows() != 0)
 	{
-		stream << "VECTORS " << name << " float\n";
+		stream << "VECTORS " << name << " " << getTypeName<T>() << "\n";
 
 		stream << padWithZeros(
 				descRef, 3, ref.descriptors.cols()).transpose();
